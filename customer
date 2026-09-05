@@ -1,0 +1,196 @@
+import mysql.connector
+from mysql.connector import Error
+import pandas as pd
+
+# ==============================
+# 1. EXTRACT - Connect to MySQL
+# ==============================
+
+print("Connecting to MySQL...")
+
+try:
+    connection_config = {
+        "host": "localhost",
+        "user": "root",
+        "password": "shital22",
+        "connection_timeout": 5,
+        "use_pure": True
+    }
+
+    connection = mysql.connector.connect(**connection_config)
+    cursor = connection.cursor()
+    cursor.execute("CREATE DATABASE IF NOT EXISTS customer")
+    cursor.close()
+    connection.close()
+
+    connection = mysql.connector.connect(
+        **connection_config,
+        database="customer"
+    )
+except Error as error:
+    print(f"MySQL connection failed: {error}")
+    raise SystemExit(1) from error
+
+print("MySQL Connection Successful!")
+
+# Read MySQL table using Pandas
+query = "SELECT * FROM mall_customers"
+
+table_cursor = connection.cursor()
+table_cursor.execute("SHOW TABLES LIKE 'mall_customers'")
+source_table_exists = table_cursor.fetchone() is not None
+table_cursor.close()
+
+if not source_table_exists:
+    print(
+        "Source table 'mall_customers' does not exist in database 'customer'. "
+        "Import the mall customer dataset, then run this script again."
+    )
+    connection.close()
+    raise SystemExit(1)
+
+df = pd.read_sql(query, connection)
+
+print("\nOriginal Data:")
+print(df.head())
+
+
+# ==============================
+# 2. TRANSFORM - Data Cleaning
+# ==============================
+
+print("\nChecking Missing Values:")
+print(df.isnull().sum())
+
+# Remove duplicate rows
+df = df.drop_duplicates()
+
+# Remove extra spaces from Genre column
+df["Genre"] = df["Genre"].astype(str).str.strip()
+
+# Convert Gender values to uppercase
+df["Genre"] = df["Genre"].str.upper()
+
+# Remove invalid ages
+df = df[(df["Age"] > 0) & (df["Age"] <= 100)]
+
+# Remove invalid income values
+df = df[df["Annual_Income_(k$)"] >= 0]
+
+# Remove invalid spending scores
+df = df[
+    (df["Spending_Score"] >= 0) &
+    (df["Spending_Score"] <= 100)
+]
+
+print("\nCleaned Data:")
+print(df.head())
+
+print("\nTotal Rows After Cleaning:", len(df))
+
+
+# ==============================
+# 3. LOAD - Create New Table
+# ==============================
+
+cursor = connection.cursor()
+
+# Create cleaned table
+create_table_query = """
+CREATE TABLE IF NOT EXISTS mall_customers_cleaned (
+    CustomerID INT PRIMARY KEY,
+    Genre VARCHAR(20),
+    Age INT,
+    Annual_Income INT,
+    Spending_Score INT
+)
+"""
+
+cursor.execute(create_table_query)
+
+# Clear old data
+cursor.execute("TRUNCATE TABLE mall_customers_cleaned")
+
+
+# ==============================
+# 4. Insert Cleaned Data
+# ==============================
+
+insert_query = """
+INSERT INTO mall_customers_cleaned
+(CustomerID, Genre, Age, Annual_Income, Spending_Score)
+VALUES (%s, %s, %s, %s, %s)
+"""
+
+for _, row in df.iterrows():
+    values = (
+        int(row["CustomerID"]),
+        row["Genre"],
+        int(row["Age"]),
+        int(row["Annual_Income_(k$)"]),
+        int(row["Spending_Score"])
+    )
+
+    cursor.execute(insert_query, values)
+
+connection.commit()
+
+print("\nData Successfully Loaded into mall_customers_cleaned!")
+
+
+# ==============================
+# 5. SQL QUERIES AND REPORT TABLES
+# ==============================
+
+# Store each report in its own table.
+# Replacing the tables keeps every run current.
+report_queries = {
+    "all_customers": """
+        SELECT * FROM mall_customers_cleaned
+    """,
+    "customers_above_30": """
+        SELECT * FROM mall_customers_cleaned
+        WHERE Age > 30
+    """,
+    "high_spending_customers": """
+        SELECT * FROM mall_customers_cleaned
+        WHERE Spending_Score > 70
+    """,
+    "average_age": """
+        SELECT AVG(Age) AS Average_Age
+        FROM mall_customers_cleaned
+    """,
+    "genre_wise_customer_count": """
+        SELECT Genre, COUNT(*) AS Total_Customers
+        FROM mall_customers_cleaned
+        GROUP BY Genre
+    """,
+    "top_5_highest_income_customers": """
+        SELECT * FROM mall_customers_cleaned
+        ORDER BY Annual_Income DESC
+        LIMIT 5
+    """
+}
+
+for table_name, select_query in report_queries.items():
+    cursor.execute(f"DROP TABLE IF EXISTS `{table_name}`")
+    cursor.execute(f"CREATE TABLE `{table_name}` AS {select_query}")
+
+connection.commit()
+print("\nAll SQL query results were stored in separate tables.")
+
+for table_name in report_queries:
+    print(f"\n--- {table_name.upper()} ---")
+    cursor.execute(f"SELECT * FROM `{table_name}`")
+    for row in cursor.fetchall():
+        print(row)
+
+
+# ==============================
+# CLOSE CONNECTION
+# ==============================
+
+cursor.close()
+connection.close()
+
+print("\nETL Pipeline Completed Successfully!")
